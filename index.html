@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Live Scan OCR — Prototype</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+<style>
+  :root{
+    --milk:#f7f9fb;
+    --dairy-blue:#1c4e80;
+    --dairy-blue-dark:#123353;
+    --steel:#5c7080;
+    --line:#dbe3ea;
+    --good:#1f8a5f;
+    --good-bg:#e6f5ee;
+    --warn:#b5451b;
+    --warn-bg:#fbeae2;
+    --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--milk);
+    color:var(--dairy-blue-dark);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    padding:24px;
+  }
+  .wrap{max-width:920px;margin:0 auto;}
+  header{margin-bottom:18px;}
+  h1{font-size:20px;margin:0 0 4px;letter-spacing:-0.01em;}
+  .sub{color:var(--steel);font-size:14px;line-height:1.5;max-width:64ch;}
+  .layout{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px;}
+  @media(max-width:760px){.layout{grid-template-columns:1fr;}}
+
+  .panel{
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:10px;
+    overflow:hidden;
+  }
+  .panel-head{
+    padding:10px 14px;
+    border-bottom:1px solid var(--line);
+    font-size:12px;
+    font-weight:600;
+    text-transform:uppercase;
+    letter-spacing:.06em;
+    color:var(--steel);
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+  }
+  .status-dot{
+    width:8px;height:8px;border-radius:50%;
+    background:#c7cfd6;display:inline-block;margin-right:6px;
+  }
+  .status-dot.live{background:var(--good);box-shadow:0 0 0 3px var(--good-bg);}
+  .status-dot.hold{background:var(--warn);box-shadow:0 0 0 3px var(--warn-bg);}
+
+  .video-box{position:relative;background:#0b1d2e;aspect-ratio:4/3;}
+  video, canvas.overlay{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;}
+  canvas.overlay{pointer-events:none;}
+  #captureCanvas{display:none;}
+
+  .scan-banner{
+    position:absolute;bottom:0;left:0;right:0;
+    padding:10px 12px;
+    background:linear-gradient(0deg, rgba(0,0,0,.65), transparent);
+    color:#fff;font-size:13px;font-family:var(--mono);
+    min-height:20px;
+  }
+
+  .controls{padding:12px 14px;display:flex;gap:8px;flex-wrap:wrap;}
+  button{
+    font:inherit;font-size:13px;font-weight:600;
+    padding:9px 14px;border-radius:7px;border:1px solid var(--dairy-blue);
+    background:var(--dairy-blue);color:#fff;cursor:pointer;
+  }
+  button.secondary{background:#fff;color:var(--dairy-blue);}
+  button:disabled{opacity:.4;cursor:not-allowed;}
+
+  .log-box{max-height:420px;overflow-y:auto;}
+  .log-row{
+    display:grid;grid-template-columns:1fr auto auto;gap:8px;
+    padding:10px 14px;border-bottom:1px solid var(--line);
+    font-size:13px;align-items:center;
+  }
+  .log-row:last-child{border-bottom:none;}
+  .log-row .name{font-weight:600;}
+  .log-row .qty{font-family:var(--mono);color:var(--dairy-blue);font-weight:700;}
+  .log-row .meta{font-size:11px;color:var(--steel);}
+  .empty{padding:24px 14px;color:var(--steel);font-size:13px;text-align:center;}
+
+  .tally{padding:14px;border-top:1px solid var(--line);background:#fafcfe;}
+  .tally-title{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--steel);margin-bottom:8px;font-weight:600;}
+  .tally-row{display:flex;justify-content:space-between;font-size:13px;padding:4px 0;}
+  .tally-row .n{font-family:var(--mono);font-weight:700;}
+
+  .note{
+    margin-top:18px;padding:12px 14px;border-radius:8px;
+    background:#fff;border:1px solid var(--line);
+    font-size:12.5px;color:var(--steel);line-height:1.6;
+  }
+  code{background:#eef2f6;padding:1px 5px;border-radius:4px;font-family:var(--mono);font-size:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Live Scan OCR — Prototype</h1>
+    <div class="sub">
+      Point the camera at a screen and slow-scroll or pause on rows. It grabs a frame only
+      when motion settles, runs OCR, matches text against a sample dairy product list, and
+      tallies quantities. This is a standalone test — nothing here touches the real tracker yet.
+    </div>
+  </header>
+
+  <div class="layout">
+    <div class="panel">
+      <div class="panel-head">
+        <span><span id="statusDot" class="status-dot"></span><span id="statusText">Camera off</span></span>
+        <span id="engineStatus">Tesseract idle</span>
+      </div>
+      <div class="video-box">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay" class="overlay"></canvas>
+        <div class="scan-banner" id="scanBanner">Start the camera to begin scanning.</div>
+      </div>
+      <canvas id="captureCanvas"></canvas>
+      <div class="controls">
+        <button id="startBtn">Start camera</button>
+        <button id="stopBtn" class="secondary" disabled>Stop</button>
+        <button id="resetBtn" class="secondary">Reset tally</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span>Scan log</span>
+        <span id="scanCount">0 reads · 0 dupes skipped</span>
+      </div>
+      <div class="log-box" id="logBox">
+        <div class="empty" id="logEmpty">No reads yet — matched rows will appear here as they're scanned.</div>
+      </div>
+      <div class="tally">
+        <div class="tally-title">Running order tally</div>
+        <div id="tallyBox"><div class="empty" style="padding:6px 0;">Nothing tallied yet.</div></div>
+      </div>
+      <div class="tally" style="border-top:1px solid var(--line);">
+        <div class="tally-title" style="cursor:pointer;" id="debugToggle">▸ Debug: last frame's raw OCR text</div>
+        <pre id="debugText" style="display:none;white-space:pre-wrap;font-family:var(--mono);font-size:11px;color:var(--steel);background:#f4f7fa;padding:8px;border-radius:6px;max-height:180px;overflow-y:auto;margin:8px 0 0;">(no frame read yet)</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>How the matching works in this demo:</strong> it looks for lines shaped like
+    <code>PRODUCT NAME ... NUMBER</code> and matches the product text against a small sample
+    list (Chobani, Fairlife, Stew Leonard's Milk, etc.) using fuzzy matching, then reads the
+    trailing number as the quantity. In the real integration, the sample list would be swapped
+    for your live dairy case product table, and the parsing pattern would be tuned to whatever
+    the actual sales screen's column layout looks like.
+  </div>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const captureCanvas = document.getElementById('captureCanvas');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const resetBtn = document.getElementById('resetBtn');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const engineStatus = document.getElementById('engineStatus');
+const scanBanner = document.getElementById('scanBanner');
+const logBox = document.getElementById('logBox');
+const logEmpty = document.getElementById('logEmpty');
+const scanCount = document.getElementById('scanCount');
+const tallyBox = document.getElementById('tallyBox');
+const debugToggle = document.getElementById('debugToggle');
+const debugText = document.getElementById('debugText');
+let debugOpen = false;
+debugToggle.addEventListener('click', () => {
+  debugOpen = !debugOpen;
+  debugText.style.display = debugOpen ? 'block' : 'none';
+  debugToggle.textContent = (debugOpen ? '▾' : '▸') + ' Debug: last frame\'s raw OCR text';
+});
+
+// Sample product list standing in for the real tracker's product table
+const SAMPLE_PRODUCTS = [
+  "Chobani Greek Yogurt 32oz",
+  "Fairlife 2% Milk Half Gallon",
+  "Stew Leonard's Whole Milk Gallon",
+  "Danone Oikos Yogurt 5.3oz",
+  "Land O'Lakes Butter 1lb",
+  "Horizon Organic Milk Quart",
+  "Chobani Oat Milk 52oz",
+  "Sargento Shredded Cheese 8oz"
+];
+
+// Position of each product in the list above = its expected row order on the
+// spreadsheet. Used to render the tally in sheet order rather than scan order.
+const PRODUCT_ORDER = new Map(SAMPLE_PRODUCTS.map((p, i) => [p, i]));
+
+let stream = null;
+let scanning = false;
+let lastFrameData = null;
+let stillFrames = 0;
+let ocrBusy = false;
+let scanned = 0;
+let duplicatesSkipped = 0;
+const seen = new Map(); // productName -> {qty, lastSeen}
+
+const STILL_THRESHOLD = 2;      // consecutive low-motion frames required before OCR fires
+const MOTION_SENSITIVITY = 30;  // pixel-diff sensitivity (lower = more sensitive to motion) — raised from 18 to ignore small jitter/autofocus hunting
+const SAMPLE_INTERVAL = 220;    // ms between motion checks
+
+function setStatus(mode){
+  if(mode === 'live'){
+    statusDot.className = 'status-dot live';
+    statusText.textContent = 'Scanning';
+  } else if(mode === 'hold'){
+    statusDot.className = 'status-dot hold';
+    statusText.textContent = 'Motion — waiting to settle';
+  } else {
+    statusDot.className = 'status-dot';
+    statusText.textContent = 'Camera off';
+  }
+}
+
+async function startCamera(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 960 } }
+    });
+  } catch(err){
+    // fall back to any available camera (e.g. laptop webcam during testing)
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    } catch(err2){
+      scanBanner.textContent = 'Camera access denied or unavailable: ' + err2.message;
+      return;
+    }
+  }
+  video.srcObject = stream;
+  await video.play();
+  overlay.width = video.videoWidth;
+  overlay.height = video.videoHeight;
+  scanning = true;
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  setStatus('live');
+  scanBanner.textContent = 'Watching for a steady frame...';
+  monitorLoop();
+}
+
+function stopCamera(){
+  scanning = false;
+  if(stream){ stream.getTracks().forEach(t => t.stop()); }
+  setStatus('off');
+  scanBanner.textContent = 'Start the camera to begin scanning.';
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+}
+
+// Downsampled grayscale diff to detect motion/blur cheaply
+function getSampleFrame(){
+  const w = 80, h = 60;
+  captureCanvas.width = w;
+  captureCanvas.height = h;
+  const ctx = captureCanvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h).data;
+}
+
+function frameDiff(a, b){
+  let diff = 0;
+  for(let i = 0; i < a.length; i += 4){
+    diff += Math.abs(a[i] - b[i]);
+  }
+  return diff / (a.length / 4);
+}
+
+async function monitorLoop(){
+  if(!scanning) return;
+  const sample = getSampleFrame();
+
+  if(lastFrameData){
+    const d = frameDiff(sample, lastFrameData);
+    if(d < MOTION_SENSITIVITY){
+      stillFrames++;
+    } else {
+      stillFrames = 0;
+      setStatus('hold');
+      scanBanner.textContent = 'Motion detected — pause or slow down to capture...';
+    }
+  }
+  lastFrameData = sample;
+
+  if(stillFrames >= STILL_THRESHOLD && !ocrBusy){
+    stillFrames = 0;
+    setStatus('live');
+    runOCR();
+  }
+
+  setTimeout(monitorLoop, SAMPLE_INTERVAL);
+}
+
+async function runOCR(){
+  ocrBusy = true;
+  engineStatus.textContent = 'Reading frame...';
+  scanBanner.textContent = 'Frame steady — reading...';
+
+  const fullCanvas = document.createElement('canvas');
+  fullCanvas.width = video.videoWidth;
+  fullCanvas.height = video.videoHeight;
+  fullCanvas.getContext('2d').drawImage(video, 0, 0);
+
+  try{
+    const { data } = await Tesseract.recognize(fullCanvas, 'eng');
+    debugText.textContent = data.text.trim() || '(no text recognized in this frame)';
+    handleOCRResult(data.text);
+  } catch(e){
+    scanBanner.textContent = 'OCR error: ' + e.message;
+  }
+
+  engineStatus.textContent = 'Tesseract idle';
+  ocrBusy = false;
+}
+
+// crude fuzzy match against the sample product list
+function matchProduct(line){
+  const lower = line.toLowerCase();
+  let best = null, bestScore = 0;
+  for(const p of SAMPLE_PRODUCTS){
+    const words = p.toLowerCase().split(/\s+/);
+    let score = 0;
+    for(const w of words){ if(lower.includes(w)) score++; }
+    if(score > bestScore){ bestScore = score; best = p; }
+  }
+  return bestScore >= 2 ? best : null;
+}
+
+function handleOCRResult(text){
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  let matchedAny = false;
+  let skippedRepeat = false;
+
+  for(const line of lines){
+    const numMatch = line.match(/(\d{1,4})\s*$/);
+    if(!numMatch) continue;
+    const qty = parseInt(numMatch[1], 10);
+    if(isNaN(qty) || qty <= 0 || qty > 999) continue;
+
+    const product = matchProduct(line);
+    if(!product) continue;
+
+    if(seen.has(product)){
+      // already tallied this product earlier in the session — don't add again
+      skippedRepeat = true;
+      duplicatesSkipped++;
+      continue;
+    }
+
+    matchedAny = true;
+    scanned++;
+    logRead(product, qty, line);
+    tallyProduct(product, qty);
+  }
+
+  scanCount.textContent = scanned + (scanned === 1 ? ' read' : ' reads') + ' · ' + duplicatesSkipped + ' dupes skipped';
+  if(matchedAny){
+    scanBanner.textContent = 'Watching for the next steady frame...';
+  } else if(skippedRepeat){
+    scanBanner.textContent = 'Already scanned that item — move to a new product.';
+  } else {
+    scanBanner.textContent = 'No matching product line found in that frame.';
+  }
+}
+
+function logRead(product, qty, rawLine){
+  if(logEmpty) logEmpty.remove();
+  const row = document.createElement('div');
+  row.className = 'log-row';
+  row.innerHTML = `
+    <div>
+      <div class="name">${product}</div>
+      <div class="meta">${new Date().toLocaleTimeString()}</div>
+    </div>
+    <div class="qty">${qty}</div>
+    <div class="meta" title="${rawLine}">raw</div>
+  `;
+  logBox.appendChild(row);
+}
+
+function tallyProduct(product, qty){
+  const existing = seen.get(product) || { qty: 0 };
+  existing.qty += qty;
+  existing.lastSeen = Date.now();
+  seen.set(product, existing);
+  renderTally();
+}
+
+function renderTally(){
+  if(seen.size === 0){
+    tallyBox.innerHTML = '<div class="empty" style="padding:6px 0;">Nothing tallied yet.</div>';
+    return;
+  }
+  const rows = [...seen.entries()].sort((a, b) => {
+    const orderA = PRODUCT_ORDER.has(a[0]) ? PRODUCT_ORDER.get(a[0]) : Infinity;
+    const orderB = PRODUCT_ORDER.has(b[0]) ? PRODUCT_ORDER.get(b[0]) : Infinity;
+    return orderA - orderB;
+  });
+  let html = '';
+  for(const [name, info] of rows){
+    html += `<div class="tally-row"><span>${name}</span><span class="n">${info.qty}</span></div>`;
+  }
+  tallyBox.innerHTML = html;
+}
+
+function resetTally(){
+  seen.clear();
+  scanned = 0;
+  duplicatesSkipped = 0;
+  scanCount.textContent = '0 reads · 0 dupes skipped';
+  logBox.innerHTML = '<div class="empty" id="logEmpty">No reads yet — matched rows will appear here as they\'re scanned.</div>';
+  debugText.textContent = '(no frame read yet)';
+  renderTally();
+  if(scanning) scanBanner.textContent = 'Watching for a steady frame...';
+}
+
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+resetBtn.addEventListener('click', resetTally);
+</script>
+</body>
+</html>
